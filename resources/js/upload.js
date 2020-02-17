@@ -1,68 +1,112 @@
-let fileInput = $('#file');
-fileInput.on('change', (e) => {
-    let file = e.target.files[0];
-    $.ajax({
+// ファイルの読み込み
+document.getElementById('file').addEventListener('change', (e) => {
+    handle(e.target.files[0]).catch((error) => {
+        console.log(error);
+    });
+});
+
+async function handle(image) {
+    // シグネチャ作成とリサイズを並列処理
+    const [data, resizedImage] = await Promise.all(
+        [signature(image), resize(image, 500)]
+    );
+    // シグネチャとリサイズしたファイルをs3にわたす
+    const uploadedImage = await upload(data, resizedImage);
+    // s3から受け取ったファイルを表示
+    display(uploadedImage);
+}
+
+function signature(image) {
+    return $.ajax({
         url: '/api/signature',
         type: 'POST',
         data: {
-            name: file.name,
-            size: file.size,
-            type: file.type
+            name: image.name,
+            size: image.size,
+            type: image.type
         },
-        dataType: 'json'
-    }).then((response) => {
-        let key;
-        let formData = new FormData();
-        
-        for (key in response.data) {
-            if (response.data.hasOwnProperty(key)) {
-                formData.append(key, response.data[key]);
-            }
-        }
+        dataType: 'json',
+    });
+}
 
-        // リサイズ
-        let reader = new FileReader();
+async function resize(image, max) {
+    return new Promise(resolve => {
+        const reader = new FileReader();
         reader.onload = (e) => {
-            let image = new Image();
-            image.onload = () => {
-                console.log(1)
-                let canvas = document.createElement('canvas');
-                let ctx = canvas.getContext('2d');
-                [canvas.width, canvas.height] = [image.width, image.height];
-                ctx.drawImage(image, 0, 0);
-                let base64 = canvas.toDataURL(file.type);
-                let bin = atob(base64.replace(/^.*,/, ''));
-                let buffer = new Uint8Array(bin.length);
-                for (let i = 0; i < bin.length; i++) {
-                    buffer[i] = bin.charCodeAt(i);
-                }
-                let blob = new Blob([buffer.buffer], {
-                    type: file.type
-                });
-                console.log(blob)
-                formData.append('file', blob);
-                return $.ajax({
-                    url: response.url,
-                    type: 'POST',
-                    data: formData,
-                    dataType: 'xml',
-                    processData: false,
-                    contentType: false,
-                }).catch((error) => {
-                    console.log('署名作成エラー');
-                    console.log(error);
-                });
-            };
-            image.src = e.target.result;
+            let newImage = new Image();
+            newImage.onload = async () => {
+                let [width, height] = await ratio(newImage, max);
+                let canvas = await drawCanvas(newImage, width, height);
+                let blob = await canvasToBlob(canvas, newImage);
+                resolve(blob);
+            }
+            newImage.src = e.target.result;
         };
-        reader.readAsDataURL(file);
-    }).then((response) => {
-        let body = $('body');
-        let img = document.createElement('img');
-        img.src = $(response).find('Location').first().text();
-        body.append(img);
-    }).catch((error) => {
-        console.log('アップロードエラー');
-        console.log(error);
-    })
-});
+        reader.readAsDataURL(image);
+    });
+}
+
+function ratio(image, max) {
+    if (image.width < max && image.height < max) {
+        return [image.width, image.height];
+    } else {
+        if (image.width > image.height) {
+            return [max, (image.height * max) / image.width];
+        } else {
+            return [max, (image.width * max) / image.height];
+        }
+    }
+}
+
+function drawCanvas(image, width, height) {
+    let canvas = document.createElement('canvas');
+    let ctx = canvas.getContext('2d');
+    [canvas.width, canvas.height] = [width, height];
+    ctx.drawImage(image, 0, 0, image.width, image.height, 0, 0, width, height);
+    return canvas;
+}
+
+async function canvasToBlob(canvas, image) {
+    let base64 = canvas.toDataURL(image.type);
+    let binary = atob(base64.replace(/^.*,/, ''));
+    let blob = await binaryToBlob(binary, image);
+    return blob;
+}
+
+function binaryToBlob(binary, image) {
+    const buffer = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        buffer[i] = binary.charCodeAt(i);
+    }
+    return new Blob([buffer.buffer], { type: image.type });
+}
+
+function upload(signature, image) {
+    let formData = setFormData(signature, image);
+    return $.ajax({
+        url: signature.url,
+        type: 'POST',
+        data: formData,
+        dataType: 'xml',
+        processData: false,
+        contentType: false,
+    });
+}
+
+function setFormData(signature, image) {
+    let formData = new FormData();
+    for (let key in signature.data) {
+        if (signature.data.hasOwnProperty(key)) {
+            formData.append(key, signature.data[key]);
+        }
+    }
+    formData.append('file', image);
+    return formData;
+}
+
+function display(image) {
+    let body = document.querySelector('body');
+    let element = document.createElement('img');
+    element.src = image.querySelector('Location').innerHTML;
+    body.appendChild(element);
+}
